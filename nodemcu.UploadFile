@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+
+#
+# qubes-nodemcu -- qrexec services for managing NodeMCU
+# Copyright (C) 2017  Wojtek Porczyk <woju@invisiblethingslab.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+import os
+import string
+import sys
+import time
+
+import serial
+
+# uncomment this to see tracebacks on the other side
+#sys.stderr = sys.stdout
+
+class NodeMCUSerial(serial.Serial):
+    def write_data_with_function(self, funcname, stream, *, delay=0.1):
+        while True:
+            data = stream.read(16)
+            if not data:
+                break
+            self.write(
+                funcname.encode('ascii')
+                + b'("'
+                + ''.join(map('\\{:03d}'.format, data)).encode('ascii')
+                + b'")\n')
+            time.sleep(delay)
+
+    def write_data(self, stream, *, delay=0.1):
+        # the newline is important! without that, if the first line is empty,
+        # we'd skip it
+        self.write(b'[[\n')
+        for line in stream:
+            self.write(line)
+            time.sleep(delay)
+        self.write(b']]')
+
+    def upload_file(self, filename, stream=sys.stdin.buffer):
+        self.write('file.open(\'{}\', \'w\')\n'.format(filename).encode())
+        self.write_data_with_function('file.write', stream)
+        self.write(b'file.close()\n')
+
+    def upload_ca(self, stream=sys.stdin.buffer):
+        self.write(b'tls.cert.verify(')
+        self.write_data(stream)
+        self.write(b')\n')
+
+    def restart(self):
+        self.write(b'node.restart()\n')
+
+def get_filename():
+    try:
+        untrusted_filename = os.environ['QREXEC_SERVICE_ARGUMENT']
+    except KeyError:
+        untrusted_filename = \
+            sys.stdin.buffer.readline().rstrip(b'\n').decode('ascii')
+
+    valid_chars = string.digits + string.ascii_letters + '_.-'
+    if not all(c in valid_chars for c in untrusted_filename):
+        raise ValueError()
+    filename = untrusted_filename
+    return filename
+
+def get_nodemcu():
+    return NodeMCUSerial('/dev/ttyUSB0', 115200)
+
+
+def nodemcu_UploadFile():
+    with get_nodemcu() as nodemcu:
+        nodemcu.upload_file(get_filename())
+    sys.stdin.buffer.close()
+
+def nodemcu_UploadCA():
+    with get_nodemcu() as nodemcu:
+        nodemcu.upload_ca()
+    sys.stdin.buffer.close()
+
+def nodemcu_Restart():
+    sys.stdin.buffer.close()
+    with get_nodemcu() as nodemcu:
+        nodemcu.restart()
+
+
+def main():
+    service = os.path.basename(sys.argv[0])
+    if not service.startswith('nodemcu.'):
+        return 1
+
+    try:
+        function = globals()[service.replace('.', '_')]
+    except KeyError:
+        return 1
+
+    return function()
+
+if __name__ == '__main__':
+    sys.exit(main())
+
+# vim: ts=4 sts=4 sw=4 et
